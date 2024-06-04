@@ -331,6 +331,7 @@ def main():
     # offset all targets so that they move to the world origin
     #target_position -= env.scene.env_origins
     action = torch.zeros((env.num_envs, 1), device=env.device)
+
     # simulate physics
     count = 0
     obs, _ = env.reset()
