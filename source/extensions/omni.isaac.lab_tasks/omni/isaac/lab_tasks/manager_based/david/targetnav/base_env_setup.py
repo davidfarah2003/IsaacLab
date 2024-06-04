@@ -37,6 +37,7 @@ from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
 
+
 @configclass
 class MySceneCfg(InteractiveSceneCfg):
     """Configuration for the terrain scene with a legged robot."""
@@ -127,7 +128,6 @@ class CubeActionTerm(ActionTerm):
         self._processed_actions = torch.zeros(env.num_envs, 6, device=self.device)
         self._vel_command = torch.zeros(self.num_envs, 6, device=self.device)
 
-
     """
     Properties.
     """
@@ -147,6 +147,7 @@ class CubeActionTerm(ActionTerm):
     """
     Operations
     """
+
     def process_actions(self, actions: torch.Tensor):
         # store the raw actions
         self._raw_actions[:] = actions
@@ -184,6 +185,7 @@ def cam_depth(env: ManagerBasedEnv) -> torch.Tensor:
 @configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
+
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
@@ -213,38 +215,11 @@ class EventCfg:
     )
 
 
-@configclass
-class RewardsCfg:
-    """Reward terms for the MDP."""
-
-    # (1) Constant running reward
-    alive = RewTerm(func=mdp.is_alive, weight=1.0)
-    # (2) Failure penalty
-    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
-    # (3) Primary task: keep pole upright
-    pole_pos = RewTerm(
-        func=mdp.joint_pos_target_l2,
-        weight=-1.0,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"]), "target": 0.0},
-    )
-    # (4) Shaping tasks: lower cart velocity
-    cart_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-0.01,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"])},
-    )
-    # (5) Shaping tasks: lower pole angular velocity
-    pole_vel = RewTerm(
-        func=mdp.joint_vel_l1,
-        weight=-0.005,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"])},
-    )
-
-
 # Custom terminations mdp
 def joint_pos_out_of_manual_limit(
-        env: ManagerBasedRLEnv, room_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg
-    ) -> torch.Tensor:
+        env: ManagerBasedRLEnv, room_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg,
+        bounds: tuple[float, float, float, float]
+) -> torch.Tensor:
     """Terminate when the asset's joint positions are outside of the configured bounds.
 
     Note:
@@ -254,14 +229,33 @@ def joint_pos_out_of_manual_limit(
     asset: RigidObject = env.scene[asset_cfg.name]
     room: AssetBaseCfg = env.scene[room_cfg.name]
 
-
     if asset_cfg.joint_ids is None:
         asset_cfg.joint_ids = slice(None)
-    # compute any violations
-    out_of_upper_limits = torch.any(asset.data.joint_pos[:, asset_cfg.joint_ids] > bounds[1], dim=1)
-    out_of_lower_limits = torch.any(asset.data.joint_pos[:, asset_cfg.joint_ids] < bounds[0], dim=1)
-    return torch.logical_or(out_of_upper_limits, out_of_lower_limits)
 
+    # compute any violations
+    out_of_x_lower = asset.data.root_pos_w[:, 0] < bounds[0]
+    out_of_x_higher = asset.data.root_pos_w[:, 0] > bounds[1]
+    out_of_y_lower = asset.data.root_pos_w[:, 1] < bounds[2]
+    out_of_y_higher = asset.data.root_pos_w[:, 1] > bounds[3]
+
+    out_x = torch.logical_or(out_of_x_higher, out_of_x_lower)
+    out_y = torch.logical_or(out_of_y_higher, out_of_y_lower)
+
+    return torch.logical_or(out_x, out_y)
+
+
+@configclass
+class RewardsCfg:
+    """Reward terms for the MDP."""
+
+    # (1) Constant running reward
+    alive = RewTerm(func=mdp.is_alive, weight=-0.1)
+
+    # (2) Failure (out of bounds , timeout)
+    terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-2.0)
+    time_out = RewTerm(func=mdp.time_out, weigth=-1.0)
+
+    # (3)
 
 @configclass
 class TerminationsCfg:
@@ -271,7 +265,7 @@ class TerminationsCfg:
     # (2) Cart out of bounds
     dog_out_of_bounds = DoneTerm(
         func=mdp.joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("robot"), "room_cfg": SceneEntityCfg("room")},
+        params={"asset_cfg": SceneEntityCfg("robot"), "room_cfg": SceneEntityCfg("room"), "bounds": (-3.0, 3.0)},
     )
 
 
@@ -292,9 +286,8 @@ class CubeEnvCfg(ManagerBasedRLEnv):
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
     observations: ObservationsCfg = ObservationsCfg()
+
     # RL settings
-
-
 
     def __post_init__(self):
         """Post initialization."""
