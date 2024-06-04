@@ -54,7 +54,7 @@ class MySceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.5, 0.0)),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6152), lin_vel=(0,0,0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6152), lin_vel=(0, 0, 0)),
     )
 
     room = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/room",
@@ -95,6 +95,28 @@ class MySceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=1000.0),
     )
 
+
+def quaternion_to_yaw(quaternion):
+    """
+    Convert a quaternion to a yaw angle.
+
+    Parameters:
+    quaternion (torch.Tensor): Tensor of shape (num_envs, 4) representing quaternions [x, y, z, w]
+
+    Returns:
+    torch.Tensor: Tensor of shape (num_envs,) representing yaw angles
+    """
+    # Extract the components of the quaternion
+    x, y, z, w = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
+
+    # Calculate the yaw angle
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = torch.atan2(siny_cosp, cosy_cosp)
+
+    return yaw
+
+
 class CubeActionTerm(ActionTerm):
     """Simple action term that implements a PD controller to track a target position.
 
@@ -112,27 +134,36 @@ class CubeActionTerm(ActionTerm):
     track the target position.
     """
 
-    _asset: RigidObject
     """The articulation asset on which the action term is applied."""
+    _asset: RigidObject
 
-    def __init__(self, cfg, env: ManagerBasedEnv):
+    def __init__(self, cfg: 'CubeActionTermCfg', env: ManagerBasedEnv):  # cfg is of type CubeActionTermCfg
         # call super constructor
         super().__init__(cfg, env)
+
         # create buffers
-        self._raw_actions = torch.zeros(env.num_envs, 3, device=self.device)
-        self._processed_actions = torch.zeros(env.num_envs, 3, device=self.device)
-        self._vel_command = torch.zeros(self.num_envs, 6, device=self.device)
+        self._raw_actions = torch.zeros(self.num_envs, 1, device=self.device)
+        self._processed_actions = torch.zeros(self.num_envs, 1, device=self.device)
+        self._vel_command = torch.zeros(self.num_envs, 6, device=self.device)   # (x, y, z, roll, pitch, yaw)
+
+        # Variables to allow relative action
+        self._orig_x = torch.zeros(self.num_envs, 1, device=self.device)  # To store original position
+        self._orig_yaw = torch.zeros(self.num_envs, 1, device=self.device)  # To store original yaw angle
+        self._orig_raw = torch.zeros(self.num_envs, 1, device=self.device)  # To store original command (update if it changes)
+
         # gains of controller
         self.p_gain = cfg.p_gain
         self.d_gain = cfg.d_gain
+        self.mode = cfg.mode
 
     """
     Properties.
     """
 
+    # set action input dimension to 1
     @property
     def action_dim(self) -> int:
-        return self._raw_actions.shape[1]
+        return 1
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -145,28 +176,62 @@ class CubeActionTerm(ActionTerm):
     """
     Operations
     """
-
-    # Preprocess the command to only
     def process_actions(self, actions: torch.Tensor):
         # store the raw actions
-        self._raw_actions[:] = actions
-        # Apply actions once the robot hits the ground
+        self._raw_actions = actions
+
+        # Apply actions only once all the robots hit the ground
         if torch.all(self._asset.data.root_lin_vel_w[:, 2].abs() < 1e-2):
-            self._processed_actions[:, :2] = self._raw_actions[:, :2]
-            self._processed_actions[:, 2] = 0.0
+            self._processed_actions = self._raw_actions
+
+            # Create a mask to update original properties only if there is a new action for the particular robot
+            unchanged_actions = torch.all(torch.isclose(self.raw_actions, self._orig_raw, atol=1e-2), dim=1)
+
+            if torch.any(~unchanged_actions):
+                self._orig_x[~unchanged_actions] = self._asset.data.root_pos_w[~unchanged_actions, 0].reshape((self.num_envs, self.action_dim))
+                self._orig_yaw[~unchanged_actions] = quaternion_to_yaw(self._asset.data.root_quat_w[~unchanged_actions]).reshape((self.num_envs, self.action_dim))
         else:
             self._processed_actions = torch.zeros_like(self._processed_actions)
 
     def apply_actions(self):
-        # implement a PD controller to track the target position
-        pos_error = self._processed_actions - (self._asset.data.root_pos_w - self._env.scene.env_origins)
-        vel_error = -self._asset.data.root_lin_vel_w
-        # set velocity targets
-        # set velocity targets only for x and y components
-        self._vel_command[:, :2] = self.p_gain * pos_error[:, :2] + self.d_gain * vel_error[:, :2]
-        self._vel_command[:, 2] = self._asset.data.root_lin_vel_w[:, 2]  # Maintain current z velocity
+        # Given x coordinate command
+        if self.mode == 0:
+            curr_x = self._asset.data.root_pos_w[:, 0].reshape((self.num_envs, self.action_dim))
+            pos_error = self._processed_actions - (curr_x - self._orig_x)     # pos err = target - progress
+            vel_error = -self._asset.data.root_lin_vel_w[:, 0].reshape((self.num_envs, self.action_dim))  # vel err = - current x velocity
+
+            print(f"Current x: {curr_x}")
+            print(f"Target x: {self._processed_actions - self._orig_x}")
+            print(f"Original x: {self._orig_x}")
+            print(f"Position error: {pos_error}")
+            print(f"Velocity error: {vel_error}")
+
+
+            # Control velocity in the x-axis
+            self._vel_command[:, 0] = (self.p_gain * pos_error + self.d_gain * vel_error).reshape(self.num_envs)     # x velocity control
+            self._vel_command[:, 1:3] = self._asset.data.root_lin_vel_w[:, 1:]  # Maintain current y and z velocities
+            self._vel_command[:, 3:] = self._asset.data.root_ang_vel_w          # Maintain current xyz ang velocities
+
+            print(f"Velocity command: {self._vel_command}")
+            print("-" * 80)
+
+        elif self.mode == 1:
+            # Control yaw
+            curr_yaw = quaternion_to_yaw(self._asset.data.root_quat_w).reshape((self.num_envs, self.action_dim))
+            yaw_error = self._processed_actions - (curr_yaw - self._orig_yaw)   # yaw err = target - progress
+            vel_error = -self._asset.data.root_ang_vel_w[:, 2].reshape((self.num_envs, self.action_dim))  # vel err = - current z ang velocity
+
+            self._vel_command[:, :3] = self._asset.data.root_lin_vel_w          # Maintain current xyz velocities
+            self._vel_command[:, 3:5] = self._asset.data.root_ang_vel_w[:, :3]  # Maintain current xy ang velocities
+            self._vel_command[:, 5] = (self.p_gain * yaw_error + self.d_gain * vel_error[:, 5]).reshape(self.num_envs)  # z ang velocity control
+
+        else:
+            # Maintain current velocities if the mode is not recognized
+            self._vel_command[:, :3] = self._asset.data.root_lin_vel_w
+            self._vel_command[:, 3:] = self._asset.data.root_ang_vel_w
 
         self._asset.write_root_velocity_to_sim(self._vel_command)
+
 
 @configclass
 class CubeActionTermCfg(ActionTermCfg):
@@ -175,15 +240,21 @@ class CubeActionTermCfg(ActionTermCfg):
     class_type: type = CubeActionTerm
     """The class corresponding to the action term."""
 
-    p_gain: float = 5.0
     """Proportional gain of the PD controller."""
-    d_gain: float = 0.5
+    p_gain: float = 5.0
+
     """Derivative gain of the PD controller."""
+    d_gain: float = 0.5
+
+    """The command mode for the action term. 0: Forward, 1: Left, 2: Right. Defaults to 0"""
+    mode: int = 0
 
 
 @configclass
 class ActionsCfg:
-    joint_pos = CubeActionTermCfg(asset_name="cube")
+    forward = CubeActionTermCfg(asset_name="cube", mode=0)
+    #turn = CubeActionTermCfg(asset_name="cube", mode=1)
+    test = mdp.pos
 
 
 ##
@@ -195,9 +266,11 @@ def base_position(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tens
     asset: RigidObject = env.scene[asset_cfg.name]
     return asset.data.root_pos_w - env.scene.env_origins
 
+
 @configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
+
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
@@ -212,6 +285,7 @@ class ObservationsCfg:
     # observation groups
     policy: PolicyCfg = PolicyCfg()
 
+
 @configclass
 class EventCfg:
     reset_base = EventTerm(
@@ -219,7 +293,7 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (0, 0)},
-            "velocity_range": {"x": (0, 0),"y": (0, 0),"z": (0, 0)},
+            "velocity_range": {"x": (0, 0), "y": (0, 0), "z": (0, 0)},
             "asset_cfg": SceneEntityCfg("cube"),
         },
     )
@@ -251,16 +325,16 @@ def main():
     env = ManagerBasedEnv(cfg=env_cfg)
 
     # Setup target position commands with random x and y, and fixed z
-    target_position = torch.rand(env.num_envs, 2, device=env.device)   # Randomize x and y coordinates
-    fixed_z_column = torch.full((env.num_envs, 1), 2, device=env.device)    # fixed z of 1m
-    target_position = torch.cat((target_position, fixed_z_column), dim=1)
+    target_position = torch.rand(env.num_envs, 2, device=env.device)  # Randomize x and y coordinates
+    fixed_z_column = torch.full((env.num_envs, 1), 2, device=env.device)  # fixed z of 1m
 
     # offset all targets so that they move to the world origin
     #target_position -= env.scene.env_origins
-
+    action = torch.zeros((env.num_envs, 1), device=env.device)
     # simulate physics
     count = 0
     obs, _ = env.reset()
+
     while simulation_app.is_running():
         with torch.inference_mode():
             # reset
@@ -270,21 +344,22 @@ def main():
                 print("-" * 80)
                 print("[INFO]: Resetting environment...")
 
-            # step env
-            if(count < 100):
-                target_position[:, :2] = torch.tensor([1, 1], device=env.device)
-            elif (count < 150):
-                target_position[:, :2] = torch.tensor([1, -1], device=env.device)
-            elif (count < 200):
-                target_position[:, :2] = torch.tensor([-1, -1], device=env.device)
-            else:
-                target_position[:, :2] = torch.tensor([-1, 1], device=env.device)
+            action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
 
-            obs, _ = env.step(target_position)
+            # # step env
+            # if (count < 100):
+            #     action[:, 0] = torch.zeros_like(action[:, 0], device=env.device)
+            # elif (count < 150):
+            #     action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
+            # elif (count < 200):
+            #     action[:, 0] = torch.full_like(action[:, 0], -1, device=env.device)
+            # else:
+            #     action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
+
+            obs, _ = env.step(action)
             # print mean squared position error between target and current position
-            error = torch.norm(obs["policy"] - target_position).mean().item()
-            print(f"[Step: {count:04d}]: Mean position error: {error:.4f}")
-
+            #error = torch.norm(obs["policy"][0] - action).mean().item()
+            #print(f"[Step: {count:04d}]: Mean position error: {error:.4f}")
 
             # update counter
             count += 1
