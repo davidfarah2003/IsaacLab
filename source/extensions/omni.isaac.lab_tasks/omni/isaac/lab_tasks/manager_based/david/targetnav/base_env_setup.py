@@ -2,6 +2,7 @@ import argparse
 import os
 
 from omni.isaac.lab.app import AppLauncher
+from omni.isaac.lab.envs.mdp import JointVelocityActionCfg
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on using the interactive scene interface.")
@@ -23,7 +24,7 @@ import torch
 import omni.isaac.lab.envs.mdp as mdp
 import omni.isaac.lab.sim as sim_utils
 from omni.isaac.lab.assets import AssetBaseCfg, RigidObject, RigidObjectCfg
-from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedEnvCfg
+from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedEnvCfg, ManagerBasedRLEnv
 from omni.isaac.lab.managers import ActionTerm, ActionTermCfg
 from omni.isaac.lab.managers import EventTermCfg as EventTerm
 from omni.isaac.lab.managers import ObservationGroupCfg as ObsGroup
@@ -96,26 +97,6 @@ class MySceneCfg(InteractiveSceneCfg):
     )
 
 
-def quaternion_to_yaw(quaternion):
-    """
-    Convert a quaternion to a yaw angle.
-
-    Parameters:
-    quaternion (torch.Tensor): Tensor of shape (num_envs, 4) representing quaternions [x, y, z, w]
-
-    Returns:
-    torch.Tensor: Tensor of shape (num_envs,) representing yaw angles
-    """
-    # Extract the components of the quaternion
-    x, y, z, w = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
-
-    # Calculate the yaw angle
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = torch.atan2(siny_cosp, cosy_cosp)
-
-    return yaw
-
 class CubeActionTerm(ActionTerm):
     """Simple action term that implements a PD controller to track a target position.
 
@@ -143,9 +124,7 @@ class CubeActionTerm(ActionTerm):
         self._raw_actions = torch.zeros(env.num_envs, 3, device=self.device)
         self._processed_actions = torch.zeros(env.num_envs, 3, device=self.device)
         self._vel_command = torch.zeros(self.num_envs, 6, device=self.device)
-        # gains of controller
-        self.p_gain = cfg.p_gain
-        self.d_gain = cfg.d_gain
+
 
     """
     Properties.
@@ -166,7 +145,6 @@ class CubeActionTerm(ActionTerm):
     """
     Operations
     """
-
     def process_actions(self, actions: torch.Tensor):
         # store the raw actions
         self._raw_actions[:] = actions
@@ -197,7 +175,7 @@ class CubeActionTermCfg(ActionTermCfg):
 
 @configclass
 class ActionsCfg:
-    joint_pos = CubeActionTermCfg(asset_name="cube")
+    vel = JointVelocityActionCfg(asset_name="robot")
 
 
 ##
@@ -243,7 +221,7 @@ class EventCfg:
 
 
 @configclass
-class CubeEnvCfg(ManagerBasedEnvCfg):
+class CubeEnvCfg(ManagerBasedRLEnv):
     """Configuration for the locomotion velocity-tracking environment."""
 
     # Scene settings
