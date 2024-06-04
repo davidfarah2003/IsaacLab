@@ -34,12 +34,18 @@ from omni.isaac.lab.scene import InteractiveSceneCfg
 from omni.isaac.lab.utils import configclass
 from omni.isaac.lab.sensors import CameraCfg
 from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
+from omni.isaac.lab.managers import RewardTermCfg as RewTerm
+from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
 
 @configclass
 class MySceneCfg(InteractiveSceneCfg):
     """Configuration for the terrain scene with a legged robot."""
 
     ground = AssetBaseCfg(prim_path="/World/ground", spawn=GroundPlaneCfg())
+
+    room = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/room",
+                        spawn=UsdFileCfg(usd_path="omniverse://localhost/Library/assets/simple_room/simple_room.usd"),
+                        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, 0.8)))
 
     # add cube
     cube: RigidObjectCfg = RigidObjectCfg(
@@ -57,10 +63,6 @@ class MySceneCfg(InteractiveSceneCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6152), lin_vel=(0, 0, 0)),
     )
-
-    room = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/room",
-                        spawn=UsdFileCfg(usd_path="omniverse://localhost/Library/assets/simple_room/simple_room.usd"),
-                        init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, 0.8)))
 
     ball = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ball",
                           spawn=sim_utils.SphereCfg(radius=0.1,
@@ -121,8 +123,8 @@ class CubeActionTerm(ActionTerm):
         # call super constructor
         super().__init__(cfg, env)
         # create buffers
-        self._raw_actions = torch.zeros(env.num_envs, 3, device=self.device)
-        self._processed_actions = torch.zeros(env.num_envs, 3, device=self.device)
+        self._raw_actions = torch.zeros(env.num_envs, 6, device=self.device)
+        self._processed_actions = torch.zeros(env.num_envs, 6, device=self.device)
         self._vel_command = torch.zeros(self.num_envs, 6, device=self.device)
 
 
@@ -149,15 +151,10 @@ class CubeActionTerm(ActionTerm):
         # store the raw actions
         self._raw_actions[:] = actions
         # no-processing of actions
-        self._processed_actions[:] = self._raw_actions[:]
+        self._processed_actions = self._raw_actions
 
     def apply_actions(self):
-        # implement a PD controller to track the target position
-        pos_error = self._processed_actions - (self._asset.data.root_pos_w - self._env.scene.env_origins)
-        vel_error = -self._asset.data.root_lin_vel_w
-        # set velocity targets
-        self._vel_command[:, :3] = self.p_gain * pos_error + self.d_gain * vel_error
-        self._asset.write_root_velocity_to_sim(self._vel_command)
+        self._asset.write_root_velocity_to_sim(self._processed_actions)
 
 
 @configclass
@@ -167,11 +164,6 @@ class CubeActionTermCfg(ActionTermCfg):
     class_type: type = CubeActionTerm
     """The class corresponding to the action term."""
 
-    p_gain: float = 5.0
-    """Proportional gain of the PD controller."""
-    d_gain: float = 0.5
-    """Derivative gain of the PD controller."""
-
 
 @configclass
 class ActionsCfg:
@@ -179,25 +171,26 @@ class ActionsCfg:
 
 
 ##
-# Custom observation term
+# Custom observation terms
 ##
-def base_position(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Root linear velocity in the asset's root frame."""
-    # extract the used quantities (to enable type-hinting)
-    asset: RigidObject = env.scene[asset_cfg.name]
-    return asset.data.root_pos_w - env.scene.env_origins
+def cam_rgb(env: ManagerBasedEnv) -> torch.Tensor:
+    return env.scene["camera"].data.output["rgb"]
+
+
+def cam_depth(env: ManagerBasedEnv) -> torch.Tensor:
+    return env.scene["camera"].data.output["distance_to_image_plane"]
 
 
 @configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
-
     @configclass
     class PolicyCfg(ObsGroup):
         """Observations for policy group."""
 
         # cube velocity
-        position = ObsTerm(func=base_position, params={"asset_cfg": SceneEntityCfg("cube")})
+        camera_rgb = ObsTerm(func=cam_rgb)
+        camera_depth = ObsTerm(func=cam_depth)
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -221,6 +214,75 @@ class EventCfg:
 
 
 @configclass
+class RewardsCfg:
+    """Reward terms for the MDP."""
+
+    # (1) Constant running reward
+    alive = RewTerm(func=mdp.is_alive, weight=1.0)
+    # (2) Failure penalty
+    terminating = RewTerm(func=mdp.is_terminated, weight=-2.0)
+    # (3) Primary task: keep pole upright
+    pole_pos = RewTerm(
+        func=mdp.joint_pos_target_l2,
+        weight=-1.0,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"]), "target": 0.0},
+    )
+    # (4) Shaping tasks: lower cart velocity
+    cart_vel = RewTerm(
+        func=mdp.joint_vel_l1,
+        weight=-0.01,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["slider_to_cart"])},
+    )
+    # (5) Shaping tasks: lower pole angular velocity
+    pole_vel = RewTerm(
+        func=mdp.joint_vel_l1,
+        weight=-0.005,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["cart_to_pole"])},
+    )
+
+
+# Custom terminations mdp
+def joint_pos_out_of_manual_limit(
+        env: ManagerBasedRLEnv, room_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+    """Terminate when the asset's joint positions are outside of the configured bounds.
+
+    Note:
+        This function is similar to :func:`joint_pos_out_of_limit` but allows the user to specify the bounds manually.
+    """
+    # extract the used quantities (to enable type-hinting)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    room: AssetBaseCfg = env.scene[room_cfg.name]
+
+
+    if asset_cfg.joint_ids is None:
+        asset_cfg.joint_ids = slice(None)
+    # compute any violations
+    out_of_upper_limits = torch.any(asset.data.joint_pos[:, asset_cfg.joint_ids] > bounds[1], dim=1)
+    out_of_lower_limits = torch.any(asset.data.joint_pos[:, asset_cfg.joint_ids] < bounds[0], dim=1)
+    return torch.logical_or(out_of_upper_limits, out_of_lower_limits)
+
+
+@configclass
+class TerminationsCfg:
+    """Termination terms for the MDP."""
+    # (1) Time out
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    # (2) Cart out of bounds
+    dog_out_of_bounds = DoneTerm(
+        func=mdp.joint_pos_out_of_manual_limit,
+        params={"asset_cfg": SceneEntityCfg("robot"), "room_cfg": SceneEntityCfg("room")},
+    )
+
+
+@configclass
+class CurriculumCfg:
+    """Configuration for the curriculum."""
+
+    pass
+
+
+@configclass
 class CubeEnvCfg(ManagerBasedRLEnv):
     """Configuration for the locomotion velocity-tracking environment."""
 
@@ -230,6 +292,9 @@ class CubeEnvCfg(ManagerBasedRLEnv):
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
     observations: ObservationsCfg = ObservationsCfg()
+    # RL settings
+
+
 
     def __post_init__(self):
         """Post initialization."""

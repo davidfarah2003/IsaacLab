@@ -2,7 +2,7 @@ import argparse
 import math
 import os
 
-from omni.isaac.orbit.app import AppLauncher
+from omni.isaac.lab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on using the interactive scene interface.")
@@ -22,45 +22,41 @@ simulation_app = app_launcher.app
 
 import torch
 
-import omni.isaac.orbit.sim as sim_utils
-from omni.isaac.orbit.assets import ArticulationCfg, AssetBaseCfg
-from omni.isaac.orbit.scene import InteractiveScene, InteractiveSceneCfg
-from omni.isaac.orbit.sim import SimulationContext, UsdFileCfg, GroundPlaneCfg, SpawnerCfg
-from omni.isaac.orbit.utils import configclass
-from omni.isaac.orbit.envs import BaseEnvCfg, BaseEnv, mdp
+import omni.isaac.lab.sim as sim_utils
+from omni.isaac.lab.assets import ArticulationCfg, AssetBaseCfg
+from omni.isaac.lab.scene import InteractiveScene, InteractiveSceneCfg
+from omni.isaac.lab.sim import SimulationContext, UsdFileCfg, GroundPlaneCfg, SpawnerCfg
+from omni.isaac.lab.utils import configclass
+from omni.isaac.lab.envs import BaseEnvCfg, BaseEnv, mdp
 
 ##
 # Pre-defined configs
 ##
-from omni.isaac.orbit_assets import CARTPOLE_CFG, UNITREE_GO2_CFG  # isort:skip
-from omni.isaac.orbit.sensors import RayCasterCfg, ContactSensorCfg, CameraCfg
-from omni.isaac.orbit.sensors.ray_caster import patterns
-from omni.isaac.orbit.envs import RLTaskEnvCfg
-from omni.isaac.orbit.utils import configclass
-from omni.isaac.orbit.envs import RLTaskEnvCfg
-import omni.isaac.orbit.sim as sim_utils
-from omni.isaac.orbit.assets import ArticulationCfg, AssetBaseCfg
-from omni.isaac.orbit.scene import InteractiveSceneCfg
-from omni.isaac.orbit.sensors import ContactSensorCfg, RayCasterCfg, patterns
-from omni.isaac.orbit.terrains import TerrainImporterCfg
-from omni.isaac.orbit.utils import configclass
-from omni.isaac.orbit_assets.unitree import UNITREE_GO2_CFG, GO1_ACTUATOR_CFG
-from omni.isaac.orbit.managers import EventTermCfg as EventTerm
-from omni.isaac.orbit.managers import ObservationGroupCfg as ObsGroup
-from omni.isaac.orbit.managers import ObservationTermCfg as ObsTerm
-from omni.isaac.orbit.managers import RewardTermCfg as RewTerm
-from omni.isaac.orbit.managers import SceneEntityCfg
-from omni.isaac.orbit.managers import TerminationTermCfg as DoneTerm
-from omni.isaac.orbit.utils import configclass
-from omni.isaac.orbit.utils.noise import AdditiveUniformNoiseCfg as Unoise
-import omni.isaac.orbit_tasks.locomotion.velocity.mdp as mdp
-from omni.isaac.orbit.utils.assets import ISAAC_NUCLEUS_DIR, ISAAC_ORBIT_NUCLEUS_DIR, check_file_path, read_file
+from omni.isaac.lab_assets import CARTPOLE_CFG, UNITREE_GO2_CFG  # isort:skip
+from omni.isaac.lab.sensors import RayCasterCfg, ContactSensorCfg, CameraCfg
+from omni.isaac.lab.sensors.ray_caster import patterns
+from omni.isaac.lab.utils import configclass
+from omni.isaac.lab.envs import ManagerBasedRLEnv
+import omni.isaac.lab.sim as sim_utils
+from omni.isaac.lab.assets import ArticulationCfg, AssetBaseCfg
+from omni.isaac.lab.scene import InteractiveSceneCfg
+from omni.isaac.lab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from omni.isaac.lab.terrains import TerrainImporterCfg
+from omni.isaac.lab.utils import configclass
+from omni.isaac.lab_assets.unitree import UNITREE_GO2_CFG, GO1_ACTUATOR_CFG
+from omni.isaac.lab.managers import EventTermCfg as EventTerm
+from omni.isaac.lab.managers import ObservationGroupCfg as ObsGroup
+from omni.isaac.lab.managers import ObservationTermCfg as ObsTerm
+from omni.isaac.lab.managers import RewardTermCfg as RewTerm
+from omni.isaac.lab.managers import SceneEntityCfg
+from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
+from omni.isaac.lab.utils import configclass
+from omni.isaac.lab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+import omni.isaac.lab_tasks.manager_based.locomotion.velocity.mdp as mdp
+from omni.isaac.lab.utils.assets import ISAAC_NUCLEUS_DIR, check_file_path, read_file
 import gymnasium as gym
-from omni.isaac.orbit_tasks.locomotion.velocity.config.unitree_go2.agents.rsl_rl_cfg import UnitreeGo2FlatPPORunnerCfg
-from omni.isaac.orbit_tasks.utils import get_checkpoint_path
-from omni.isaac.orbit_tasks.utils.wrappers.rsl_rl import RslRlVecEnvWrapper
-from rsl_rl.runners import OnPolicyRunner
-import omni.isaac.orbit_tasks.locomotion.velocity.config.unitree_go2
+from omni.isaac.lab_tasks.utils import get_checkpoint_path
+from omni.isaac.lab_tasks.utils.wrappers.rsl_rl import RslRlVecEnvWrapper
 
 @configclass
 class MySceneCfg(InteractiveSceneCfg):
