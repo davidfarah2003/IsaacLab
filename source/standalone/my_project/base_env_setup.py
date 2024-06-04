@@ -146,6 +146,7 @@ class CubeActionTerm(ActionTerm):
     Operations
     """
 
+    # Preprocess the command to only
     def process_actions(self, actions: torch.Tensor):
         # store the raw actions
         self._raw_actions[:] = actions
