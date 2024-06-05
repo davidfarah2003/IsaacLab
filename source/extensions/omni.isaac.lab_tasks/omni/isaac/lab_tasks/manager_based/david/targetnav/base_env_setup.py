@@ -2,7 +2,6 @@ import argparse
 import os
 
 from omni.isaac.lab.app import AppLauncher
-from omni.isaac.lab.envs.mdp import JointVelocityActionCfg
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on using the interactive scene interface.")
@@ -24,7 +23,7 @@ import torch
 import omni.isaac.lab.envs.mdp as mdp
 import omni.isaac.lab.sim as sim_utils
 from omni.isaac.lab.assets import AssetBaseCfg, RigidObject, RigidObjectCfg, AssetBase
-from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedEnvCfg, ManagerBasedRLEnv
+from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedEnvCfg, ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from omni.isaac.lab.managers import ActionTerm, ActionTermCfg
 from omni.isaac.lab.managers import EventTermCfg as EventTerm
 from omni.isaac.lab.managers import ObservationGroupCfg as ObsGroup
@@ -36,8 +35,8 @@ from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg, ContactSensor
 from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
+from omni.isaac.lab.envs.mdp import JointVelocityActionCfg
 import torch.nn.functional as F
-
 
 
 @configclass
@@ -177,7 +176,7 @@ class CubeActionTermCfg(ActionTermCfg):
 
 @configclass
 class ActionsCfg:
-    vel = JointVelocityActionCfg(asset_name="robot")
+    vel: CubeActionTermCfg = CubeActionTermCfg(asset_name="cube")
 
 
 ##
@@ -293,6 +292,7 @@ class ObservationsCfg:
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
+    sim: SimCfg = SimCfg()
 
 
 @configclass
@@ -347,7 +347,7 @@ class RewardsCfg:
 
     # (2) Failure (out of bounds , timeout)
     terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-50.0)
-    time_out = RewTerm(func=mdp.time_out, weigth=-1.0)
+    time_out = RewTerm(func=mdp.time_out, weight=-1.0)
 
     # (3) Rewards
     is_close = RewTerm(func=is_close_once, weight=20)           # Intermediary reward if close to the target
@@ -377,26 +377,60 @@ class CurriculumCfg:
 
 
 @configclass
-class CubeEnvCfg(ManagerBasedRLEnv):
+class CommandsCfg:
+    """Command specifications for the MDP."""
+    # no commands for this MDP
+    null = mdp.NullCommandCfg()
+
+    # base_velocity = mdp.UniformVelocityCommandCfg(
+    #     asset_name="robot",
+    #     resampling_time_range=(10.0, 10.0),
+    #     rel_standing_envs=0.02,
+    #     rel_heading_envs=1.0,
+    #     heading_command=True,
+    #     heading_control_stiffness=0.5,
+    #     debug_vis=True,
+    #     ranges=mdp.UniformVelocityCommandCfg.Ranges(
+    #         lin_vel_x=(-1.0, 1.0), lin_vel_y=(-1.0, 1.0), ang_vel_z=(-1.0, 1.0), heading=(-math.pi, math.pi)
+    #     ),
+    # )
+
+
+
+
+@configclass
+class CubeEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
     # Scene settings
     scene: MySceneCfg = MySceneCfg(num_envs=args_cli.num_envs, env_spacing=10)
     # Basic settings
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
+    commands: CommandsCfg = CommandsCfg()
     observations: ObservationsCfg = ObservationsCfg()
-
     # RL settings
+    rewards: RewardsCfg = RewardsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+    curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self):
         """Post initialization."""
         # general settings
         self.decimation = 4  # env decimation -> 20 Hz control (calls to the model for actions)
-        # simulation settings
-        self.sim.dt = 0.01  # simulation timestep -> 100 Hz physics
+        self.episode_length_s = 20.0
 
-        self.close_reward_given = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.target_reward_given = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # simulation settings
+        self.sim.dt = 0.01  # run Physics at 100Hz
+        # update sensor update periods
+
+        # we tick all the sensors based on the smallest update period (physics update period)
+        if self.scene.contact_forces is not None:
+            self.scene.contact_forces.update_period = self.sim.dt
+        if self.scene.camera is not None:
+            self.scene.camera.update_period = self.sim.dt
+
+        self.close_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
+        self.target_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
 
 def main():
     """Main function."""
@@ -405,13 +439,7 @@ def main():
     env = ManagerBasedEnv(cfg=env_cfg)
 
     robot = env.scene[SceneEntityCfg("cube")]
-    # Setup target position commands with random x and y, and fixed z
-    target_position = robot  # Randomize x and y coordinates
-    fixed_z_column = torch.full((env.num_envs, 1), 0.6152, device=env.device)  # fixed z of 1m
-
-    # offset all targets so that they move to the world origin
-    #target_position -= env.scene.env_origins
-    action = torch.zeros((env.num_envs, 1), device=env.device)
+    action = torch.zeros((env.num_envs, 3), device=env.device)
 
     # simulate physics
     count = 0
@@ -426,8 +454,6 @@ def main():
                 print("-" * 80)
                 print("[INFO]: Resetting environment...")
 
-            action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
-
             # # step env
             # if (count < 100):
             #     action[:, 0] = torch.zeros_like(action[:, 0], device=env.device)
@@ -439,9 +465,6 @@ def main():
             #     action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
 
             obs, _ = env.step(action)
-            # print mean squared position error between target and current position
-            #error = torch.norm(obs["policy"][0] - action).mean().item()
-            #print(f"[Step: {count:04d}]: Mean position error: {error:.4f}")
 
             # update counter
             count += 1
