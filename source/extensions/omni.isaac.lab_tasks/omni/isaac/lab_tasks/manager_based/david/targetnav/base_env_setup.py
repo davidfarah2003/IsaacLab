@@ -36,6 +36,7 @@ from omni.isaac.lab.sensors import CameraCfg
 from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
+import torch.nn.functional as F
 
 
 @configclass
@@ -203,6 +204,29 @@ def is_close_to(env: ManagerBasedEnv,
     return l2_distance(env, cfg1, cfg2) < threshold  # Should be bool tensor of dim (nb_envs)
 
 
+def angle_diff(env: ManagerBasedEnv,
+               cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
+               cfg2: SceneEntityCfg = SceneEntityCfg("ball")):
+    obj1: RigidObject = env.scene[cfg1.name]
+    obj2: RigidObject = env.scene[cfg2.name]
+
+    vect_roots = obj2.data.root_pos_w[:] - obj1.data.root_pos_w[:]
+    vect_roots[:, 2] = 0  # set all z to 0 as it's not needed
+
+    # Compute the norm of vect_roots and add epsilon to avoid division by zero
+    vect_roots_norm = vect_roots / (torch.norm(vect_roots, dim=1, keepdim=True) + epsilon)
+
+    # Define the x-axis in the same frame
+    x_axis = torch.tensor((1, 0, 0), device=env.device).unsqueeze(0)
+
+    # Compute cosine similarity with x axis (in robot frame)
+    cosine_sim = F.cosine_similarity(vect_roots_norm, x_axis)
+    
+    cosine_sim = torch.clamp(cosine_sim, -1.0, 1.0)     # clip to [-1, 1] to avoid NaNs in acos
+    angle_in_radians = torch.acos(cosine_sim)   # Compute the angle in radians
+    return torch.degrees(angle_in_radians)      # Compute angle in degrees
+
+
 @configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
@@ -279,7 +303,6 @@ class RewardsCfg:
 
     # (3) Rewards
     is_close = RewTerm(func=is_close_to, weight=2)
-    
 
     # (4) Negative rewards
 
