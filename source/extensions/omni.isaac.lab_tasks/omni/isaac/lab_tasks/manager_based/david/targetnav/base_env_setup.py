@@ -68,7 +68,7 @@ class MySceneCfg(InteractiveSceneCfg):
     ball = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ball",
                           spawn=sim_utils.SphereCfg(radius=0.1,
                                                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-                                                    mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+                                                    mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
                                                     collision_props=sim_utils.CollisionPropertiesCfg(),
                                                     visual_material=sim_utils.PreviewSurfaceCfg(
                                                         diffuse_color=(1.0, 0.0, 0.0), metallic=0),
@@ -85,7 +85,7 @@ class MySceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
         ),
-        offset=CameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+        offset=CameraCfg.OffsetCfg(pos=(0.4, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
     )
 
     # lights
@@ -151,8 +151,11 @@ class CubeActionTerm(ActionTerm):
     def process_actions(self, actions: torch.Tensor):
         # store the raw actions
         self._raw_actions[:] = actions
-        # no-processing of actions
+
+        # set z, pitch and roll velocities to 0
         self._processed_actions = self._raw_actions
+        self._processed_actions[:, 2] = self._asset.data.root_pos_w[:, 2]
+        self._processed_actions[:, 3:5] = 0
 
     def apply_actions(self):
         self._asset.write_root_velocity_to_sim(self._processed_actions)
@@ -182,6 +185,24 @@ def cam_depth(env: ManagerBasedEnv) -> torch.Tensor:
     return env.scene["camera"].data.output["distance_to_image_plane"]
 
 
+def l2_distance(env: ManagerBasedEnv,
+                cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
+                cfg2: SceneEntityCfg = SceneEntityCfg("ball")):
+    obj1: RigidObject = env.scene[cfg1.name]
+    obj2: RigidObject = env.scene[cfg2.name]
+
+    sub = obj1.data.root_pos_w[:] - obj2.data.root_pos_w[:]
+    sub[:, 2] = 0  # set all z to 0 as it's not needed
+    return sub.norm(dim=1)  # Should be tensor of dim (nb_envs)
+
+
+def is_close_to(env: ManagerBasedEnv,
+                cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
+                cfg2: SceneEntityCfg = SceneEntityCfg("ball"),
+                threshold=0.2):
+    return l2_distance(env, cfg1, cfg2) < threshold  # Should be bool tensor of dim (nb_envs)
+
+
 @configclass
 class ObservationsCfg:
     """Observation specifications for the MDP."""
@@ -193,6 +214,7 @@ class ObservationsCfg:
         # cube velocity
         camera_rgb = ObsTerm(func=cam_rgb)
         camera_depth = ObsTerm(func=cam_depth)
+        l2_dist = ObsTerm(func=l2_distance)
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -255,7 +277,12 @@ class RewardsCfg:
     terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-2.0)
     time_out = RewTerm(func=mdp.time_out, weigth=-1.0)
 
-    # (3)
+    # (3) Rewards
+    is_close = RewTerm(func=is_close_to, weight=2)
+    
+
+    # (4) Negative rewards
+
 
 @configclass
 class TerminationsCfg:
@@ -265,7 +292,7 @@ class TerminationsCfg:
     # (2) Cart out of bounds
     dog_out_of_bounds = DoneTerm(
         func=mdp.joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("robot"), "room_cfg": SceneEntityCfg("room"), "bounds": (-3.0, 3.0)},
+        params={"asset_cfg": SceneEntityCfg("cube"), "room_cfg": SceneEntityCfg("room"), "bounds": (-3.0, 3.0)},
     )
 
 
