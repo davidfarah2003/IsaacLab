@@ -32,7 +32,7 @@ from omni.isaac.lab.managers import ObservationTermCfg as ObsTerm
 from omni.isaac.lab.managers import SceneEntityCfg
 from omni.isaac.lab.scene import InteractiveSceneCfg
 from omni.isaac.lab.utils import configclass
-from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg
+from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg, ContactSensor
 from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
@@ -262,10 +262,13 @@ def reset_env_params(env: ManagerBasedRLEnv):
     env.target_reward_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
-def got_illegal_contacts(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces")):
-    sensor:  = env.scene[sensor_cfg.name]
-    sensor.
+def got_illegal_contacts(env: ManagerBasedRLEnv):
+    print(env.observation_manager)
 
+
+def contact_forces(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces")):
+    sensor: ContactSensor = env.scene[sensor_cfg.name]
+    return sensor.data.net_forces_w()
 
 
 @configclass
@@ -273,7 +276,7 @@ class ObservationsCfg:
     @configclass
     class SimCfg(ObsGroup):
         """Observations for simulation and rewards"""
-
+        forces = ObsTerm(func=contact_forces)
 
     @configclass
     class PolicyCfg(ObsGroup):
