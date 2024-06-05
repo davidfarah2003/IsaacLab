@@ -60,8 +60,9 @@ class MySceneCfg(InteractiveSceneCfg):
                                                          disable_gravity=False),
             mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
             physics_material=sim_utils.RigidBodyMaterialCfg(),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.5, 0.0)),
+            activate_contact_sensors=True
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6152), lin_vel=(0, 0, 0)),
     )
@@ -77,7 +78,7 @@ class MySceneCfg(InteractiveSceneCfg):
                           init_state=RigidObjectCfg.InitialStateCfg(pos=(1, 1, 0.8)))
 
     contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/robot", update_period=0.0, history_length=6, debug_vis=True
+        prim_path="{ENV_REGEX_NS}/robot", update_period=0.0, history_length=6, debug_vis=False
     )
 
     # sensors
@@ -159,7 +160,7 @@ class CubeActionTerm(ActionTerm):
 
         # set z, pitch and roll velocities to 0
         self._processed_actions = self._raw_actions
-        self._processed_actions[:, 2] = self._asset.data.root_pos_w[:, 2]
+        self._processed_actions[:, 2] = self._asset.data.root_lin_vel_w[:, 2]
         self._processed_actions[:, 3:5] = 0
 
     def apply_actions(self):
@@ -182,7 +183,7 @@ class ActionsCfg:
 ##
 # Custom observation terms
 ##
-def cam_rgb(env: ManagerBasedRLEnv) -> torch.Tensor:
+def cam_rgb(env: ManagerBasedRLEnv) -> torch.Tensor():
     return env.scene["camera"].data.output["rgb"]
 
 
@@ -192,7 +193,7 @@ def cam_depth(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 def l2_distance(env: ManagerBasedRLEnv,
                 cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
-                cfg2: SceneEntityCfg = SceneEntityCfg("ball")):
+                cfg2: SceneEntityCfg = SceneEntityCfg("ball")) -> torch.Tensor:
     obj1: RigidObject = env.scene[cfg1.name]
     obj2: RigidObject = env.scene[cfg2.name]
 
@@ -230,13 +231,12 @@ def angle_diff(env: ManagerBasedRLEnv,
 
     # Define the x-axis in the same frame
     x_axis = torch.tensor((1, 0, 0), device=env.device).expand_as(vect_roots_norm)
-    print(f"x axis: {x_axis}")  # Print the x_axis for debugging
 
     # Compute cosine similarity with x axis (in robot frame)
     cosine_sim = F.cosine_similarity(vect_roots_norm, x_axis)
-    cosine_sim = torch.clamp(cosine_sim, -1.0, 1.0)     # clip to [-1, 1] to avoid NaNs in acos
-    angle_in_radians = torch.acos(cosine_sim)   # Compute the angle in radians
-    return torch.degrees(angle_in_radians)      # Compute angle in degrees
+    cosine_sim = torch.clamp(cosine_sim, -1.0, 1.0)  # clip to [-1, 1] to avoid NaNs in acos
+    angle_in_radians = torch.acos(cosine_sim)  # Compute the angle in radians
+    return torch.rad2deg(angle_in_radians)  # Compute angle in degrees
 
 
 def is_angle_close(env: ManagerBasedRLEnv,
@@ -256,18 +256,21 @@ def reached_target(env: ManagerBasedRLEnv, dist_threshold=0.2, angle_threshold=1
     return ret
 
 
-def reset_env_params(env: ManagerBasedRLEnv):
+def reset_env_params(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
     env.close_reward_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     env.target_reward_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
-def got_illegal_contacts(env: ManagerBasedRLEnv):
-    print(env.observation_manager)
+def got_illegal_contacts(env: ManagerBasedRLEnv, threshold=0.01):
+    forces = contact_forces(env)
+    forces[:, :, 2] = 0     # set z components to 0 (gravity)
+    print(forces)
+    return forces.norm(dim=1) > threshold
 
 
 def contact_forces(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces")):
     sensor: ContactSensor = env.scene[sensor_cfg.name]
-    return sensor.data.net_forces_w()
+    return sensor.data.net_forces_w
 
 
 @configclass
@@ -282,8 +285,8 @@ class ObservationsCfg:
         """Observations for policy group"""
 
         # cube velocity
-        camera_rgb = ObsTerm(func=cam_rgb)
-        camera_depth = ObsTerm(func=cam_depth)
+        # camera_rgb = ObsTerm(func=cam_rgb)
+        # camera_depth = ObsTerm(func=cam_depth)
         l2_dist = ObsTerm(func=l2_distance)
 
         def __post_init__(self):
@@ -311,8 +314,10 @@ class EventCfg:
 
 # Custom terminations mdp
 def joint_pos_out_of_manual_limit(
-        env: ManagerBasedRLEnv, room_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg,
-        bounds: tuple[float, float, float, float]
+        env: ManagerBasedRLEnv,
+        room_cfg: SceneEntityCfg = SceneEntityCfg("room"),
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+        bounds: tuple[float, float, float, float] = (-3.0, 3.0, -3.0, 3.0)
 ) -> torch.Tensor:
     """Terminate when the asset's joint positions are outside of the configured bounds.
 
@@ -343,18 +348,18 @@ class RewardsCfg:
     """Reward terms for the MDP."""
 
     # (1) Constant running reward
-    alive = RewTerm(func=mdp.is_alive, weight=-0.1)
+    alive = RewTerm(func=mdp.is_alive, weight=-1)
 
     # (2) Failure (out of bounds , timeout)
     terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-50.0)
     time_out = RewTerm(func=mdp.time_out, weight=-1.0)
 
     # (3) Rewards
-    is_close = RewTerm(func=is_close_once, weight=20)           # Intermediary reward if close to the target
-    target_reached = RewTerm(func=reached_target, weight=30)    # Reward when target is reached
+    is_close = RewTerm(func=is_close_once, weight=40)  # Intermediary reward if close to the target
+    target_reached = RewTerm(func=reached_target, weight=100)  # Reward when target is reached
 
     # (4) Negative rewards
-
+    illegal_contacts = RewTerm(func=got_illegal_contacts, weight=-10)
 
 
 @configclass
@@ -364,15 +369,15 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     # (2) Cart out of bounds
     dog_out_of_bounds = DoneTerm(
-        func=mdp.joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("cube"), "room_cfg": SceneEntityCfg("room"), "bounds": (-3.0, 3.0)},
+        func=joint_pos_out_of_manual_limit,
+        params={"asset_cfg": SceneEntityCfg("cube"), "room_cfg": SceneEntityCfg("room"),
+                "bounds": (-3.0, 3.0, -3.0, 3.0)},
     )
 
 
 @configclass
 class CurriculumCfg:
     """Configuration for the curriculum."""
-
     pass
 
 
@@ -394,8 +399,6 @@ class CommandsCfg:
     #         lin_vel_x=(-1.0, 1.0), lin_vel_y=(-1.0, 1.0), ang_vel_z=(-1.0, 1.0), heading=(-math.pi, math.pi)
     #     ),
     # )
-
-
 
 
 @configclass
@@ -432,14 +435,15 @@ class CubeEnvCfg(ManagerBasedRLEnvCfg):
         self.close_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
         self.target_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
 
+
 def main():
     """Main function."""
     # setup base environment
     env_cfg = CubeEnvCfg()
-    env = ManagerBasedEnv(cfg=env_cfg)
+    env = ManagerBasedRLEnv(cfg=env_cfg)
 
-    robot = env.scene[SceneEntityCfg("cube")]
-    action = torch.zeros((env.num_envs, 3), device=env.device)
+    #robot = env.scene[SceneEntityCfg("cube").name]
+    action = torch.zeros((env.num_envs, 6), device=env.device)
 
     # simulate physics
     count = 0
@@ -454,17 +458,25 @@ def main():
                 print("-" * 80)
                 print("[INFO]: Resetting environment...")
 
-            # # step env
-            # if (count < 100):
-            #     action[:, 0] = torch.zeros_like(action[:, 0], device=env.device)
-            # elif (count < 150):
-            #     action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
-            # elif (count < 200):
-            #     action[:, 0] = torch.full_like(action[:, 0], -1, device=env.device)
-            # else:
-            #     action[:, 0] = torch.ones_like(action[:, 0], device=env.device)
+            # step env
+            if (count < 100):
+                action[:] = torch.tensor((0, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
+            elif (count < 150):
+                action[:] = torch.tensor((0, 0, 0, 0, 0, 1), device=env.device).expand_as(action)
+            elif (count < 200):
+                action[:] = torch.tensor((0, 0, 0, 0, 0, -1), device=env.device).expand_as(action)
+            else:
+                action[:] = torch.tensor((1, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
 
-            obs, _ = env.step(action)
+            print("ok", cam_rgb(env).shape)
+            print(cam_depth(env).shape)
+
+            obs, rew, resets_terminated, res_truncated, extras = env.step(action)
+            # print(f"obs: {obs}")
+            # print(f"rew: {rew}")
+            # print(f"resets terminated: {resets_terminated}")
+            # print(f"res truncated: {res_truncated}")
+            # print(f"extras: {extras}")
 
             # update counter
             count += 1
