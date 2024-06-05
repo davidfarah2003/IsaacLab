@@ -23,7 +23,7 @@ import torch
 
 import omni.isaac.lab.envs.mdp as mdp
 import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.assets import AssetBaseCfg, RigidObject, RigidObjectCfg
+from omni.isaac.lab.assets import AssetBaseCfg, RigidObject, RigidObjectCfg, AssetBase
 from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedEnvCfg, ManagerBasedRLEnv
 from omni.isaac.lab.managers import ActionTerm, ActionTermCfg
 from omni.isaac.lab.managers import EventTermCfg as EventTerm
@@ -32,7 +32,7 @@ from omni.isaac.lab.managers import ObservationTermCfg as ObsTerm
 from omni.isaac.lab.managers import SceneEntityCfg
 from omni.isaac.lab.scene import InteractiveSceneCfg
 from omni.isaac.lab.utils import configclass
-from omni.isaac.lab.sensors import CameraCfg
+from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg
 from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
@@ -76,6 +76,10 @@ class MySceneCfg(InteractiveSceneCfg):
                                                         diffuse_color=(1.0, 0.0, 0.0), metallic=0),
                                                     ),
                           init_state=RigidObjectCfg.InitialStateCfg(pos=(1, 1, 0.8)))
+
+    contact_forces = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/robot", update_period=0.0, history_length=6, debug_vis=True
+    )
 
     # sensors
     camera = CameraCfg(
@@ -258,13 +262,22 @@ def reset_env_params(env: ManagerBasedRLEnv):
     env.target_reward_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
+def got_illegal_contacts(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces")):
+    sensor:  = env.scene[sensor_cfg.name]
+    sensor.
+
+
+
 @configclass
 class ObservationsCfg:
-    """Observation specifications for the MDP."""
+    @configclass
+    class SimCfg(ObsGroup):
+        """Observations for simulation and rewards"""
+
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Observations for policy group."""
+        """Observations for policy group"""
 
         # cube velocity
         camera_rgb = ObsTerm(func=cam_rgb)
@@ -305,7 +318,7 @@ def joint_pos_out_of_manual_limit(
     """
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
-    room: AssetBaseCfg = env.scene[room_cfg.name]
+    room: AssetBase = env.scene[room_cfg.name]
 
     if asset_cfg.joint_ids is None:
         asset_cfg.joint_ids = slice(None)
@@ -338,6 +351,7 @@ class RewardsCfg:
     target_reached = RewTerm(func=reached_target, weight=30)    # Reward when target is reached
 
     # (4) Negative rewards
+
 
 
 @configclass
