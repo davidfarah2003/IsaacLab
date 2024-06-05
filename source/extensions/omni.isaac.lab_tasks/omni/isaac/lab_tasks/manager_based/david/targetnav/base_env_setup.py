@@ -244,10 +244,13 @@ def is_angle_close(env: ManagerBasedRLEnv,
 
 
 def reached_target(env: ManagerBasedRLEnv, dist_threshold=0.2, angle_threshold=10):
-    return torch.logical_and(
-        is_angle_close(env, threshold=angle_threshold),
-        is_close_to(env, threshold=dist_threshold)
-    )
+    reached = torch.logical_and(is_close_to(env, threshold=dist_threshold),
+                                is_angle_close(env, threshold=angle_threshold))
+    # Apply mask to only give reward the first time
+    ret = torch.logical_and(reached, ~env.target_reward_given)
+    # Update the target reward given flags
+    env.target_reward_given = torch.logical_or(env.target_reward_given, reached)
+    return ret
 
 
 def reset_env_params(env: ManagerBasedRLEnv):
@@ -331,8 +334,8 @@ class RewardsCfg:
     time_out = RewTerm(func=mdp.time_out, weigth=-1.0)
 
     # (3) Rewards
-    is_close = RewTerm(func=is_close_once, weight=20)
-    target_reached = RewTerm(func=reached_target, weight=30)
+    is_close = RewTerm(func=is_close_once, weight=20)           # Intermediary reward if close to the target
+    target_reached = RewTerm(func=reached_target, weight=30)    # Reward when target is reached
 
     # (4) Negative rewards
 
