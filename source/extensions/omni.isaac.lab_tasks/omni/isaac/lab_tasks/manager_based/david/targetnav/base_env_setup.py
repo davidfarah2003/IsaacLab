@@ -39,6 +39,7 @@ from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
 import torch.nn.functional as F
 
 
+
 @configclass
 class MySceneCfg(InteractiveSceneCfg):
     """Configuration for the terrain scene with a legged robot."""
@@ -178,15 +179,15 @@ class ActionsCfg:
 ##
 # Custom observation terms
 ##
-def cam_rgb(env: ManagerBasedEnv) -> torch.Tensor:
+def cam_rgb(env: ManagerBasedRLEnv) -> torch.Tensor:
     return env.scene["camera"].data.output["rgb"]
 
 
-def cam_depth(env: ManagerBasedEnv) -> torch.Tensor:
+def cam_depth(env: ManagerBasedRLEnv) -> torch.Tensor:
     return env.scene["camera"].data.output["distance_to_image_plane"]
 
 
-def l2_distance(env: ManagerBasedEnv,
+def l2_distance(env: ManagerBasedRLEnv,
                 cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
                 cfg2: SceneEntityCfg = SceneEntityCfg("ball")):
     obj1: RigidObject = env.scene[cfg1.name]
@@ -197,34 +198,61 @@ def l2_distance(env: ManagerBasedEnv,
     return sub.norm(dim=1)  # Should be tensor of dim (nb_envs)
 
 
-def is_close_to(env: ManagerBasedEnv,
+def is_close_to(env: ManagerBasedRLEnv,
                 cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
                 cfg2: SceneEntityCfg = SceneEntityCfg("ball"),
                 threshold=0.2):
     return l2_distance(env, cfg1, cfg2) < threshold  # Should be bool tensor of dim (nb_envs)
 
 
-def angle_diff(env: ManagerBasedEnv,
+def is_close_once(env: ManagerBasedRLEnv, func=is_close_to):
+    is_close = func(env)
+    ret = torch.logical_and(is_close, ~env.close_reward_given)
+    env.close_reward_given = torch.logical_or(env.close_reward_given, is_close)
+    return ret
+
+
+def angle_diff(env: ManagerBasedRLEnv,
                cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
-               cfg2: SceneEntityCfg = SceneEntityCfg("ball")):
+               cfg2: SceneEntityCfg = SceneEntityCfg("ball"),
+               epsilon=1e-8):
     obj1: RigidObject = env.scene[cfg1.name]
     obj2: RigidObject = env.scene[cfg2.name]
 
     vect_roots = obj2.data.root_pos_w[:] - obj1.data.root_pos_w[:]
     vect_roots[:, 2] = 0  # set all z to 0 as it's not needed
 
-    # Compute the norm of vect_roots and add epsilon to avoid division by zero
-    vect_roots_norm = vect_roots / (torch.norm(vect_roots, dim=1, keepdim=True) + epsilon)
+    # Compute the norm of vect_roots and add epsilon to avoid division by zero if norm is 0
+    vect_roots_norm = vect_roots / (torch.norm(vect_roots, dim=1, keepdim=True).expand_as(vect_roots) + epsilon)
 
     # Define the x-axis in the same frame
-    x_axis = torch.tensor((1, 0, 0), device=env.device).unsqueeze(0)
+    x_axis = torch.tensor((1, 0, 0), device=env.device).expand_as(vect_roots_norm)
+    print(f"x axis: {x_axis}")  # Print the x_axis for debugging
 
     # Compute cosine similarity with x axis (in robot frame)
     cosine_sim = F.cosine_similarity(vect_roots_norm, x_axis)
-    
     cosine_sim = torch.clamp(cosine_sim, -1.0, 1.0)     # clip to [-1, 1] to avoid NaNs in acos
     angle_in_radians = torch.acos(cosine_sim)   # Compute the angle in radians
     return torch.degrees(angle_in_radians)      # Compute angle in degrees
+
+
+def is_angle_close(env: ManagerBasedRLEnv,
+                   cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
+                   cfg2: SceneEntityCfg = SceneEntityCfg("ball"),
+                   threshold=10):
+    return torch.abs(angle_diff(env, cfg1, cfg2)) < threshold
+
+
+def reached_target(env: ManagerBasedRLEnv, dist_threshold=0.2, angle_threshold=10):
+    return torch.logical_and(
+        is_angle_close(env, threshold=angle_threshold),
+        is_close_to(env, threshold=dist_threshold)
+    )
+
+
+def reset_env_params(env: ManagerBasedRLEnv):
+    env.close_reward_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    env.target_reward_given = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
 
 @configclass
@@ -250,7 +278,7 @@ class ObservationsCfg:
 
 @configclass
 class EventCfg:
-    reset_base = EventTerm(
+    reset_cube = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
@@ -259,6 +287,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("cube"),
         },
     )
+    reset_vars = EventTerm(func=reset_env_params, mode="reset")
 
 
 # Custom terminations mdp
@@ -298,11 +327,12 @@ class RewardsCfg:
     alive = RewTerm(func=mdp.is_alive, weight=-0.1)
 
     # (2) Failure (out of bounds , timeout)
-    terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-2.0)
+    terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-50.0)
     time_out = RewTerm(func=mdp.time_out, weigth=-1.0)
 
     # (3) Rewards
-    is_close = RewTerm(func=is_close_to, weight=2)
+    is_close = RewTerm(func=is_close_once, weight=20)
+    target_reached = RewTerm(func=reached_target, weight=30)
 
     # (4) Negative rewards
 
@@ -329,7 +359,6 @@ class CurriculumCfg:
 @configclass
 class CubeEnvCfg(ManagerBasedRLEnv):
     """Configuration for the locomotion velocity-tracking environment."""
-
     # Scene settings
     scene: MySceneCfg = MySceneCfg(num_envs=args_cli.num_envs, env_spacing=10)
     # Basic settings
@@ -342,10 +371,12 @@ class CubeEnvCfg(ManagerBasedRLEnv):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 4  # env decimation -> 50 Hz control
+        self.decimation = 4  # env decimation -> 20 Hz control (calls to the model for actions)
         # simulation settings
-        self.sim.dt = 0.005  # simulation timestep -> 200 Hz physics
+        self.sim.dt = 0.01  # simulation timestep -> 100 Hz physics
 
+        self.close_reward_given = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.target_reward_given = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
 def main():
     """Main function."""
