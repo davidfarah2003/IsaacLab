@@ -64,7 +64,7 @@ class MySceneCfg(InteractiveSceneCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.5, 0.0)),
             activate_contact_sensors=True
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6152), lin_vel=(0, 0, 0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.7), lin_vel=(0, 0, 0)),
     )
 
     ball = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ball",
@@ -199,7 +199,7 @@ def l2_distance(env: ManagerBasedRLEnv,
 
     sub = obj1.data.root_pos_w[:] - obj2.data.root_pos_w[:]
     sub[:, 2] = 0  # set all z to 0 as it's not needed
-    return sub.norm(dim=1)  # Should be tensor of dim (nb_envs)
+    return torch.norm(sub, dim=1)  # Should be tensor of dim (nb_envs)
 
 
 def is_close_to(env: ManagerBasedRLEnv,
@@ -263,7 +263,7 @@ def reset_env_params(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
 
 def got_illegal_contacts(env: ManagerBasedRLEnv, threshold=0.01):
     forces = contact_forces(env)
-    forces[:, :, 2] = 0     # set z components to 0 (gravity)
+    forces[:, :, 2] = 0  # set z components to 0 (gravity)
     print(forces)
     return forces.norm(dim=1) > threshold
 
@@ -278,7 +278,8 @@ class ObservationsCfg:
     @configclass
     class SimCfg(ObsGroup):
         """Observations for simulation and rewards"""
-        forces = ObsTerm(func=contact_forces)
+        #forces = ObsTerm(func=contact_forces)
+        vel = ObsTerm(func=lambda env: env.scene["cube"].data.root_lin_vel_w)
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -287,6 +288,7 @@ class ObservationsCfg:
         # cube velocity
         # camera_rgb = ObsTerm(func=cam_rgb)
         # camera_depth = ObsTerm(func=cam_depth)
+
         l2_dist = ObsTerm(func=l2_distance)
 
         def __post_init__(self):
@@ -359,7 +361,7 @@ class RewardsCfg:
     target_reached = RewTerm(func=reached_target, weight=100)  # Reward when target is reached
 
     # (4) Negative rewards
-    illegal_contacts = RewTerm(func=got_illegal_contacts, weight=-10)
+    #illegal_contacts = RewTerm(func=got_illegal_contacts, weight=-10)
 
 
 @configclass
@@ -370,7 +372,8 @@ class TerminationsCfg:
     # (2) Cart out of bounds
     dog_out_of_bounds = DoneTerm(
         func=joint_pos_out_of_manual_limit,
-        params={"asset_cfg": SceneEntityCfg("cube"), "room_cfg": SceneEntityCfg("room"),
+        params={"asset_cfg": SceneEntityCfg("cube"),
+                "room_cfg": SceneEntityCfg("room"),
                 "bounds": (-3.0, 3.0, -3.0, 3.0)},
     )
 
@@ -386,19 +389,6 @@ class CommandsCfg:
     """Command specifications for the MDP."""
     # no commands for this MDP
     null = mdp.NullCommandCfg()
-
-    # base_velocity = mdp.UniformVelocityCommandCfg(
-    #     asset_name="robot",
-    #     resampling_time_range=(10.0, 10.0),
-    #     rel_standing_envs=0.02,
-    #     rel_heading_envs=1.0,
-    #     heading_command=True,
-    #     heading_control_stiffness=0.5,
-    #     debug_vis=True,
-    #     ranges=mdp.UniformVelocityCommandCfg.Ranges(
-    #         lin_vel_x=(-1.0, 1.0), lin_vel_y=(-1.0, 1.0), ang_vel_z=(-1.0, 1.0), heading=(-math.pi, math.pi)
-    #     ),
-    # )
 
 
 @configclass
@@ -420,17 +410,17 @@ class CubeEnvCfg(ManagerBasedRLEnvCfg):
         """Post initialization."""
         # general settings
         self.decimation = 4  # env decimation -> 20 Hz control (calls to the model for actions)
-        self.episode_length_s = 20.0
+        self.episode_length_s = 20
 
         # simulation settings
         self.sim.dt = 0.01  # run Physics at 100Hz
         # update sensor update periods
 
         # we tick all the sensors based on the smallest update period (physics update period)
-        if self.scene.contact_forces is not None:
-            self.scene.contact_forces.update_period = self.sim.dt
-        if self.scene.camera is not None:
-            self.scene.camera.update_period = self.sim.dt
+        # if self.scene.contact_forces is not None:
+        #     self.scene.contact_forces.update_period = self.sim.dt
+        # if self.scene.camera is not None:
+        #     self.scene.camera.update_period = self.sim.dt
 
         self.close_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
         self.target_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
@@ -442,7 +432,6 @@ def main():
     env_cfg = CubeEnvCfg()
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
-    #robot = env.scene[SceneEntityCfg("cube").name]
     action = torch.zeros((env.num_envs, 6), device=env.device)
 
     # simulate physics
@@ -458,21 +447,18 @@ def main():
                 print("-" * 80)
                 print("[INFO]: Resetting environment...")
 
-            # step env
-            if (count < 100):
-                action[:] = torch.tensor((0, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
-            elif (count < 150):
-                action[:] = torch.tensor((0, 0, 0, 0, 0, 1), device=env.device).expand_as(action)
-            elif (count < 200):
-                action[:] = torch.tensor((0, 0, 0, 0, 0, -1), device=env.device).expand_as(action)
-            else:
-                action[:] = torch.tensor((1, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
-
-            print("ok", cam_rgb(env).shape)
-            print(cam_depth(env).shape)
+            # # step env
+            # if (count < 100):
+            #     action[:] = torch.tensor((0, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
+            # elif (count < 150):
+            #     action[:] = torch.tensor((0, 0, 0, 0, 0, 1), device=env.device).expand_as(action)
+            # elif (count < 200):
+            #     action[:] = torch.tensor((0, 0, 0, 0, 0, -1), device=env.device).expand_as(action)
+            # else:
+            #     action[:] = torch.tensor((1, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
 
             obs, rew, resets_terminated, res_truncated, extras = env.step(action)
-            # print(f"obs: {obs}")
+            #print(f"obs: {obs}")
             # print(f"rew: {rew}")
             # print(f"resets terminated: {resets_terminated}")
             # print(f"res truncated: {res_truncated}")
