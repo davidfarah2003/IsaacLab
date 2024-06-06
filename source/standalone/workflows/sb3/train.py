@@ -65,6 +65,8 @@ def main():
     )
     agent_cfg = load_cfg_from_registry(args_cli.task, "sb3_cfg_entry_point")
 
+    print_dict(agent_cfg)
+
     # override configuration with command line arguments
     if args_cli.seed is not None:
         agent_cfg["seed"] = args_cli.seed

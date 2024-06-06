@@ -61,11 +61,23 @@ class MySceneCfg(InteractiveSceneCfg):
     )
 
     # sensors
+    # camera = CameraCfg(
+    #     prim_path="{ENV_REGEX_NS}/robot/front_cam",
+    #     update_period=0.1,
+    #     height=480,
+    #     width=640,
+    #     data_types=["rgb", "distance_to_image_plane"],
+    #     spawn=sim_utils.PinholeCameraCfg(
+    #         focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
+    #     ),
+    #     offset=CameraCfg.OffsetCfg(pos=(0.4, 0.0, 0.23), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
+    # )
+    # sensors
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/robot/front_cam",
         update_period=0.1,
-        height=480,
-        width=640,
+        height=128,
+        width=128,
         data_types=["rgb", "distance_to_image_plane"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
@@ -166,13 +178,22 @@ def cam_data(env: ManagerBasedRLEnv) -> torch.Tensor():
     cam : Camera = env.scene["camera"]
 
     # Extract the first three channels of the RGB tensor
-    rgb_trimmed = cam.data.output["rgb"][:, :, :, :3]
+    rgb_trimmed: torch.Tensor = cam.data.output["rgb"][:, :, :, :3] / 255.0   # Normalize to 0,1
+
+    print(rgb_trimmed.max())
     # Expand the distance tensor to have a singleton fourth dimension
     distance_expanded = cam.data.output["distance_to_image_plane"].unsqueeze(-1)
+    print(cam.data.output["distance_to_image_plane"].min())
+
     # Concatenate along the last dimension
     combined_tensor = torch.cat((rgb_trimmed, distance_expanded), dim=-1)
 
-    return combined_tensor.view(env.num_envs, 480, 640, 4)
+    # Flatten all dimensions after the 0th dimension into a single vector
+    num_envs = combined_tensor.size(0)
+    combined_tensor = combined_tensor.view(num_envs, -1)
+
+    # return combined_tensor.view(env.num_envs, combined_tensor.size(1), combined_tensor.size(2), 4)
+    return combined_tensor.view(env.num_envs, combined_tensor.size(1))
 
 
 def l2_distance(env: ManagerBasedRLEnv,
