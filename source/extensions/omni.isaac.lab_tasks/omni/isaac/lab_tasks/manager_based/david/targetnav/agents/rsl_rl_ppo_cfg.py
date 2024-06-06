@@ -13,7 +13,7 @@ from omni.isaac.lab_tasks.utils.wrappers.rsl_rl import (
 
 
 @configclass
-class CartpolePPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class TargetnavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16
     max_iterations = 150
     save_interval = 50
