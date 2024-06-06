@@ -57,8 +57,6 @@ import omni.isaac.lab_tasks  # noqa: F401
 from omni.isaac.lab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from omni.isaac.lab_tasks.utils.wrappers.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
 
-import omni.isaac.lab_tasks.manager_based.david.targetnav
-
 def main():
     """Train with stable-baselines agent."""
     # parse configuration

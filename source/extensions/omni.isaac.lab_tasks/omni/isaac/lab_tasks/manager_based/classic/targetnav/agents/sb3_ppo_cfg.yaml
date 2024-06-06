@@ -1,8 +1,6 @@
 # Reference: https://github.com/DLR-RM/rl-baselines3-zoo/blob/master/hyperparams/ppo.yml#L245
 seed: 42
 
-frame_stack: 2
-normalize: "{'norm_obs': False, 'norm_reward': True}"
 n_envs: 8
 n_timesteps: !!float 4e6
 policy: 'CnnPolicy'

@@ -1,29 +1,9 @@
-import argparse
-import os
-
-from omni.isaac.lab.app import AppLauncher
-
-# add argparse arguments
-parser = argparse.ArgumentParser(description="Tutorial on using the interactive scene interface.")
-parser.add_argument("--num_envs", type=int, default=2, help="Number of environments to spawn.")
-
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
-# parse the arguments
-args_cli = parser.parse_args()
-
-# launch omniverse app
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
-
-"""Rest everything follows."""
-
 import torch
 
 import omni.isaac.lab.envs.mdp as mdp
 import omni.isaac.lab.sim as sim_utils
 from omni.isaac.lab.assets import AssetBaseCfg, RigidObject, RigidObjectCfg, AssetBase
-from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedEnvCfg, ManagerBasedRLEnv, ManagerBasedRLEnvCfg
+from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from omni.isaac.lab.managers import ActionTerm, ActionTermCfg
 from omni.isaac.lab.managers import EventTermCfg as EventTerm
 from omni.isaac.lab.managers import ObservationGroupCfg as ObsGroup
@@ -35,7 +15,6 @@ from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg, ContactSensor, C
 from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
-from omni.isaac.lab.envs.mdp import JointVelocityActionCfg
 import torch.nn.functional as F
 
 
@@ -70,12 +49,12 @@ class MySceneCfg(InteractiveSceneCfg):
     ball = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ball",
                           spawn=sim_utils.SphereCfg(radius=0.1,
                                                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-                                                    mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
+                                                    mass_props=sim_utils.MassPropertiesCfg(mass=5),
                                                     collision_props=sim_utils.CollisionPropertiesCfg(),
                                                     visual_material=sim_utils.PreviewSurfaceCfg(
                                                         diffuse_color=(1.0, 0.0, 0.0), metallic=0),
                                                     ),
-                          init_state=RigidObjectCfg.InitialStateCfg(pos=(1, 1, 0.8)))
+                          init_state=RigidObjectCfg.InitialStateCfg(pos=(1, 1, 0.67)))
 
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/robot", update_period=0.0, history_length=6, debug_vis=False
@@ -395,7 +374,7 @@ class CommandsCfg:
 class CubeEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the locomotion velocity-tracking environment."""
     # Scene settings
-    scene: MySceneCfg = MySceneCfg(num_envs=args_cli.num_envs, env_spacing=10)
+    scene: MySceneCfg = MySceneCfg(num_envs=2, env_spacing=10)
     # Basic settings
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
@@ -424,55 +403,3 @@ class CubeEnvCfg(ManagerBasedRLEnvCfg):
 
         self.close_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
         self.target_reward_given = torch.zeros(self.scene.num_envs, dtype=torch.bool, device=self.sim.device)
-
-
-def main():
-    """Main function."""
-    # setup base environment
-    env_cfg = CubeEnvCfg()
-    env = ManagerBasedRLEnv(cfg=env_cfg)
-
-    action = torch.zeros((env.num_envs, 6), device=env.device)
-
-    # simulate physics
-    count = 0
-    obs, _ = env.reset()
-
-    while simulation_app.is_running():
-        with torch.inference_mode():
-            # reset
-            if count % 300 == 0:
-                count = 0
-                obs, _ = env.reset()
-                print("-" * 80)
-                print("[INFO]: Resetting environment...")
-
-            # step env
-            if count < 100:
-                action[:] = torch.tensor((0, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
-            elif count < 150:
-                action[:] = torch.tensor((0, 0, 0, 0, 0, 1), device=env.device).expand_as(action)
-            elif count < 200:
-                action[:] = torch.tensor((0, 0, 0, 0, 0, -1), device=env.device).expand_as(action)
-            else:
-                action[:] = torch.tensor((1, 0, 0, 0, 0, 0), device=env.device).expand_as(action)
-
-            obs, rew, resets_terminated, res_truncated, extras = env.step(action)
-            print(f"obs: {obs}")
-            # print(f"rew: {rew}")
-            # print(f"resets terminated: {resets_terminated}")
-            # print(f"res truncated: {res_truncated}")
-            # print(f"extras: {extras}")
-
-            # update counter
-            count += 1
-
-    # close the environment
-    env.close()
-
-
-if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
