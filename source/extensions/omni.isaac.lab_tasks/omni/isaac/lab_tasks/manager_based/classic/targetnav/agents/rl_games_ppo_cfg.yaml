@@ -39,7 +39,7 @@ params:
   load_path: '' # path to the checkpoint to load
 
   config:
-    name: humanoid
+    name: targetnav
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
@@ -68,7 +68,7 @@ params:
     e_clip: 0.2
     horizon_length: 32
     minibatch_size: 512
-    mini_epochs: 5
+    mini_epochs: 4
     critic_coef: 4
     clip_value: True
     seq_length: 4

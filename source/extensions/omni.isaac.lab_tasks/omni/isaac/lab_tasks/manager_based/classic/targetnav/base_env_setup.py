@@ -12,7 +12,7 @@ from omni.isaac.lab.managers import SceneEntityCfg
 from omni.isaac.lab.scene import InteractiveSceneCfg
 from omni.isaac.lab.utils import configclass
 from omni.isaac.lab.sensors import CameraCfg, ContactSensorCfg, ContactSensor, Camera
-from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg
+from omni.isaac.lab.sim import GroundPlaneCfg, UsdFileCfg, RigidBodyPropertiesCfg
 from omni.isaac.lab.managers import RewardTermCfg as RewTerm
 from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
 import torch.nn.functional as F
@@ -25,7 +25,8 @@ class MySceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(prim_path="/World/ground", spawn=GroundPlaneCfg())
 
     room = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/room",
-                        spawn=UsdFileCfg(usd_path="omniverse://localhost/Library/assets/simple_room/simple_room.usd"),
+                        spawn=UsdFileCfg(usd_path="omniverse://localhost/Library/assets/simple_room/simple_room.usd",
+                                         collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True)),
                         init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, 0.8)))
 
     # add cube
@@ -37,30 +38,30 @@ class MySceneCfg(InteractiveSceneCfg):
                                                          max_linear_velocity=3,
                                                          max_angular_velocity=80,
                                                          disable_gravity=False),
-            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+            mass_props=sim_utils.MassPropertiesCfg(mass=3.0),
             physics_material=sim_utils.RigidBodyMaterialCfg(),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.5, 0.0)),
             activate_contact_sensors=True
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6875), lin_vel=(0, 0, 0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.605), lin_vel=(0, 0, 0)),
     )
 
     ball = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ball",
                           spawn=sim_utils.SphereCfg(radius=0.1,
                                                     rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-                                                    mass_props=sim_utils.MassPropertiesCfg(mass=5),
+                                                    mass_props=sim_utils.MassPropertiesCfg(mass=10),
                                                     collision_props=sim_utils.CollisionPropertiesCfg(),
                                                     visual_material=sim_utils.PreviewSurfaceCfg(
                                                         diffuse_color=(1.0, 0.0, 0.0), metallic=0),
                                                     ),
-                          init_state=RigidObjectCfg.InitialStateCfg(pos=(1, 1, 0.67)))
+                          init_state=RigidObjectCfg.InitialStateCfg(pos=(1, 1, 0.515)))
 
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/robot", update_period=0.0, history_length=6, debug_vis=False
     )
 
-    # sensors
+    # #sensors
     # camera = CameraCfg(
     #     prim_path="{ENV_REGEX_NS}/robot/front_cam",
     #     update_period=0.1,
@@ -72,6 +73,7 @@ class MySceneCfg(InteractiveSceneCfg):
     #     ),
     #     offset=CameraCfg.OffsetCfg(pos=(0.4, 0.0, 0.23), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"),
     # )
+
     # sensors
     camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/robot/front_cam",
@@ -174,26 +176,21 @@ class ActionsCfg:
 ##
 # Custom observation terms
 ##
+def cam_data_flat(env: ManagerBasedRLEnv) -> torch.Tensor():
+    cam: Camera = env.scene["camera"]
+    cam_rgb: torch.Tensor = cam.data.output["rgb"][:, :, :, :3].flatten(start_dim=1)
+    cam_depth: torch.Tensor = cam.data.output["distance_to_image_plane"].flatten(start_dim=1)
+
+    return torch.cat((cam_rgb, cam_depth.clamp(0, 10)), dim=1)
+
+
 def cam_data(env: ManagerBasedRLEnv) -> torch.Tensor():
-    cam : Camera = env.scene["camera"]
+    cam: Camera = env.scene["camera"]
+    cam_rgb: torch.Tensor = cam.data.output["rgb"][:, :, :, :3]
+    # Clamp depth to 10 and make same dim as rgb
+    cam_depth: torch.Tensor = cam.data.output["distance_to_image_plane"].clamp(0, 10).unsqueeze(-1)
 
-    # Extract the first three channels of the RGB tensor
-    rgb_trimmed: torch.Tensor = cam.data.output["rgb"][:, :, :, :3] / 255.0   # Normalize to 0,1
-
-    print(rgb_trimmed.max())
-    # Expand the distance tensor to have a singleton fourth dimension
-    distance_expanded = cam.data.output["distance_to_image_plane"].unsqueeze(-1)
-    print(cam.data.output["distance_to_image_plane"].min())
-
-    # Concatenate along the last dimension
-    combined_tensor = torch.cat((rgb_trimmed, distance_expanded), dim=-1)
-
-    # Flatten all dimensions after the 0th dimension into a single vector
-    num_envs = combined_tensor.size(0)
-    combined_tensor = combined_tensor.view(num_envs, -1)
-
-    # return combined_tensor.view(env.num_envs, combined_tensor.size(1), combined_tensor.size(2), 4)
-    return combined_tensor.view(env.num_envs, combined_tensor.size(1))
+    return torch.cat((cam_rgb, cam_depth), dim=3)
 
 
 def l2_distance(env: ManagerBasedRLEnv,
@@ -211,7 +208,8 @@ def is_close_to(env: ManagerBasedRLEnv,
                 cfg1: SceneEntityCfg = SceneEntityCfg("cube"),
                 cfg2: SceneEntityCfg = SceneEntityCfg("ball"),
                 threshold=0.2):
-    return (l2_distance(env, cfg1, cfg2) < threshold).view(env.num_envs).float()  # Should be bool tensor of dim (nb_envs)
+    return (l2_distance(env, cfg1, cfg2) < threshold).view(
+        env.num_envs).float()  # Should be bool tensor of dim (nb_envs)
 
 
 def is_close_once(env: ManagerBasedRLEnv, func=is_close_to):
@@ -258,7 +256,7 @@ def reached_target(env: ManagerBasedRLEnv, dist_threshold=0.2, angle_threshold=1
     ret = torch.logical_and(reached, ~env.target_reward_given)
     # Update the target reward given flags
     env.target_reward_given = torch.logical_or(env.target_reward_given, reached)
-    return ret.view(env.num_envs).float()
+    return ret.view(env.num_envs)
 
 
 def reset_env_params(env: ManagerBasedRLEnv, env_ids: torch.Tensor):
@@ -306,9 +304,18 @@ class EventCfg:
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (0, 0)},
+            "pose_range": {"x": (-1, 1), "y": (-1, 1), "yaw": (0, 0)},
             "velocity_range": {"x": (0, 0), "y": (0, 0), "z": (0, 0)},
             "asset_cfg": SceneEntityCfg("cube"),
+        },
+    )
+    reset_ball = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {"x": (-1.5, 1.5), "y": (-1.0, 1.0), "z": (0.6, 0.6)},
+            "velocity_range": {"x": (0, 0), "y": (0, 0), "z": (0, 0)},
+            "asset_cfg": SceneEntityCfg("ball"),
         },
     )
     reset_vars = EventTerm(func=reset_env_params, mode="reset")
@@ -350,7 +357,7 @@ class RewardsCfg:
     """Reward terms for the MDP."""
 
     # (1) Constant running reward
-    alive = RewTerm(func=mdp.is_alive, weight=-1)
+    alive = RewTerm(func=mdp.is_alive, weight=-0.5)
 
     # (2) Failure (out of bounds , timeout)
     terminating = RewTerm(func=joint_pos_out_of_manual_limit, weight=-50.0)
@@ -376,6 +383,13 @@ class TerminationsCfg:
                 "room_cfg": SceneEntityCfg("room"),
                 "bounds": (-3.0, 3.0, -3.0, 3.0)},
     )
+    ball_out_of_bounds = DoneTerm(
+        func=joint_pos_out_of_manual_limit,
+        params={"asset_cfg": SceneEntityCfg("ball"),
+                "room_cfg": SceneEntityCfg("room"),
+                "bounds": (-3.0, 3.0, -3.0, 3.0)},
+    )
+    reached_target = DoneTerm(func=reached_target, time_out=True)
 
 
 @configclass
@@ -409,13 +423,13 @@ class CubeEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization."""
         # general settings
-        self.decimation = 4  # env decimation -> 20 Hz control (calls to the model for actions)
-        self.episode_length_s = 20
+        self.decimation = 6  # run model at half the speed of the physics (60Hz)
+        self.episode_length_s = 10
 
         # simulation settings
-        self.sim.dt = 0.01  # run Physics at 100Hz
-        # update sensor update periods
+        self.sim.dt = 1 / 300.0  # run Physics at 300Hz (0.01 = 100Hz)
 
+        # update sensor update periods
         # we tick all the sensors based on the smallest update period (physics update period)
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
